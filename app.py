@@ -1,342 +1,296 @@
 """
-Tableau de Bord Analytique et Pipeline ETL - Accidentologie France (2024)
--------------------------------------------------------------------------
-Architecture Medallion (Bronze -> Silver -> Gold)
-Intégration d'une Analyse Exploratoire des Données (EDA) exhaustive
-et préparation des features pour la modélisation prédictive.
+Tableau de bord Streamlit - Sécurité Routière France (2024)
+------------------------------------------------------
+Architecture Medallion : Audit (Bronze) & Analytique (Gold)
 """
 
 import pandas as pd
 import numpy as np
 import streamlit as st
 import plotly.express as px
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import time
 
-# ======================================================================
-# CONFIGURATION DE L'APPLICATION
-# ======================================================================
+# ----------------------------------------------------------------------
+# Configuration
+# ----------------------------------------------------------------------
 st.set_page_config(
-    page_title="Data Science - Pipeline Sécurité Routière",
+    page_title="Sécurité Routière - EDA & Dashboard",
     page_icon="🚦",
     layout="wide",
-    initial_sidebar_state="expanded"
 )
 
-# ======================================================================
-# DICTIONNAIRES DE RÉFÉRENCE (METADATA)
-# ======================================================================
+# ----------------------------------------------------------------------
+# Dictionnaires de référence complets
+# ----------------------------------------------------------------------
 LUM_LABELS = {1: "Plein jour", 2: "Crépuscule/Aube", 3: "Nuit (sans éclairage)", 4: "Nuit (éclairage éteint)", 5: "Nuit (éclairage allumé)"}
 ATM_LABELS = {1: "Normale", 2: "Pluie légère", 3: "Pluie forte", 4: "Neige/Grêle", 5: "Brouillard/Fumée", 6: "Vent fort", 7: "Temps éblouissant", 8: "Couvert", 9: "Autre"}
-CATR_LABELS = {1: "Autoroute", 2: "Route Nationale", 3: "Route Départementale", 4: "Voie Communale", 5: "Hors réseau", 6: "Parking", 9: "Autre"}
+CATR_LABELS = {1: "Autoroute", 2: "Route Nationale", 3: "Route Départementale", 4: "Voie Communale", 5: "Hors réseau public", 6: "Parc de stationnement", 9: "Autre"}
 CATU_LABELS = {1: "Conducteur", 2: "Passager", 3: "Piéton"}
 GRAV_LABELS = {1: "Indemne", 2: "Tué", 3: "Blessé hospitalisé", 4: "Blessé léger"}
-CATV_LABELS = {1: "Vélo", 2: "Cyclomoteur", 7: "Voiture", 10: "Utilitaire", 13: "PL (<7.5t)", 14: "PL (>=7.5t)", 30: "Scooter", 33: "Moto", 37: "Bus", 38: "Autocar"}
-SEXE_LABELS = {1: "Masculin", 2: "Féminin", -1: "Non renseigné"}
-JOURS_FR = {"Monday": "Lundi", "Tuesday": "Mardi", "Wednesday": "Mercredi", "Thursday": "Jeudi", "Friday": "Vendredi", "Saturday": "Samedi", "Sunday": "Dimanche"}
+CATV_LABELS = {1: "Vélo", 2: "Cyclomoteur", 7: "Voiture", 10: "Véhicule utilitaire", 13: "Poids lourd (<7.5t)", 14: "Poids lourd (>=7.5t)", 30: "Scooter", 33: "Moto", 37: "Bus", 38: "Autocar"}
 
 # ======================================================================
-# COUCHE BRONZE : EXTRACTION ET OPTIMISATION MÉMOIRE
+# COUCHE BRONZE : Chargement
 # ======================================================================
-@st.cache_data(show_spinner="Extraction Bronze et optimisation de la RAM...")
-def load_and_optimize_raw_data():
-    """Charge les données et optimise les types pour réduire le memory footprint"""
-    start_time = time.time()
-
-    # Lecture brute
-    raw = {
+@st.cache_data(show_spinner="Chargement des données brutes...")
+def load_raw_data():
+    return {
         "caracteristiques": pd.read_csv("caract-2024.csv", sep=";", encoding="utf-8", low_memory=False),
         "lieux": pd.read_csv("lieux-2024.csv", sep=";", encoding="utf-8", low_memory=False),
         "usagers": pd.read_csv("usagers-2024.csv", sep=";", encoding="utf-8", low_memory=False),
         "vehicules": pd.read_csv("vehicules-2024.csv", sep=";", encoding="utf-8", low_memory=False)
     }
 
-    # Calcul de la taille en mémoire initiale
-    mem_initial = sum(df.memory_usage(deep=True).sum() for df in raw.values()) / (1024**2)
+# ======================================================================
+# PROFILING & QUALITÉ DES DONNÉES (Inspiré du Notebook)
+# ======================================================================
+@st.cache_data(show_spinner="Analyse de la qualité en profondeur...")
+def deep_data_profiling(_raw):
+    profiling = {}
 
-    # Optimisation basique des types numériques pour simuler un pipeline Data Eng
-    for name, df in raw.items():
-        for col in df.columns:
-            if df[col].dtype == 'int64':
-                df[col] = pd.to_numeric(df[col], downcast='integer')
-            elif df[col].dtype == 'float64':
-                df[col] = pd.to_numeric(df[col], downcast='float')
+    # 1. Volumétrie et Cardinalité
+    profiling["volumetrie"] = {k: {"lignes": v.shape[0], "cols": v.shape[1], "acc_uniques": v["Num_Acc"].nunique()} for k, v in _raw.items()}
 
-    mem_final = sum(df.memory_usage(deep=True).sum() for df in raw.values()) / (1024**2)
-    exec_time = time.time() - start_time
+    # 2. Analyse de la complétude (Vrais NaN + Sentinelles -1 + Vides)
+    missing_stats = {}
+    for name, df in _raw.items():
+        n = len(df)
+        df_na = pd.DataFrame(index=df.columns)
+        df_na["NaN_Classiques"] = df.isna().sum()
+        df_na["Sentinelles_(-1)"] = (df.astype(str).apply(lambda x: x.str.strip() == "-1")).sum()
+        df_na["Total_Manquant"] = df_na["NaN_Classiques"] + df_na["Sentinelles_(-1)"]
+        df_na["%_Incomplet"] = (df_na["Total_Manquant"] / n * 100).round(2)
+        missing_stats[name] = df_na[df_na["Total_Manquant"] > 0].sort_values("%_Incomplet", ascending=False)
+    profiling["missing"] = missing_stats
 
-    return raw, mem_initial, mem_final, exec_time
+    # 3. Valeurs Aberrantes (Outliers)
+    caract = _raw["caracteristiques"]
+    usagers = _raw["usagers"]
+
+    # Géolocalisation
+    lat = pd.to_numeric(caract["lat"].astype(str).str.replace(",", "."), errors="coerce")
+    lon = pd.to_numeric(caract["long"].astype(str).str.replace(",", "."), errors="coerce")
+
+    profiling["outliers"] = {
+        "coords_nulles": int(((lat == 0) & (lon == 0)).sum()),
+        "coords_hors_limites": int(((lat < -90) | (lat > 90) | (lon < -180) | (lon > 180)).sum()),
+        "coords_manquantes": int(lat.isna().sum())
+    }
+
+    # Âges
+    ages = 2024 - pd.to_numeric(usagers["an_nais"], errors="coerce")
+    profiling["outliers"]["ages_negatifs"] = int((ages < 0).sum())
+    profiling["outliers"]["ages_centenaires"] = int((ages > 105).sum())
+
+    # 4. Intégrité Structurelle (Le problème de la table lieux)
+    lieux = _raw["lieux"]
+    acc_counts = lieux["Num_Acc"].value_counts()
+    profiling["lieux_duplicates"] = {
+        "accidents_multiples": int((acc_counts > 1).sum()),
+        "max_lignes_pour_un_acc": int(acc_counts.max())
+    }
+
+    # 5. Intégrité Référentielle (Orphelins)
+    ref_ids = set(caract["Num_Acc"])
+    profiling["orphans"] = {
+        name: len(set(_raw[name]["Num_Acc"]) - ref_ids) for name in ["lieux", "usagers", "vehicules"]
+    }
+
+    return profiling
 
 # ======================================================================
-# COUCHE SILVER & GOLD : ETL ET FEATURE ENGINEERING
+# PIPELINE SILVER & GOLD
 # ======================================================================
-@st.cache_data(show_spinner="Exécution du Pipeline ETL (Silver -> Gold)...")
-def execute_etl_pipeline(_raw):
-    caract = _raw["caracteristiques"].copy()
-    lieux = _raw["lieux"].copy()
-    usagers = _raw["usagers"].copy()
-    vehicules = _raw["vehicules"].copy()
+@st.cache_data(show_spinner="Construction du modèle analytique...")
+def process_pipeline(_raw):
+    caract, lieux, usagers, vehicules = _raw["caracteristiques"].copy(), _raw["lieux"].copy(), _raw["usagers"].copy(), _raw["vehicules"].copy()
 
-    # ---------------------------------------------------------
-    # SILVER : Nettoyage & Standardisation
-    # ---------------------------------------------------------
-    # Dates et géométrie
+    # --- NETTOYAGE (SILVER) ---
     caract["date"] = pd.to_datetime(caract["an"].astype(str) + "-" + caract["mois"].astype(str) + "-" + caract["jour"].astype(str), errors="coerce")
     caract["datetime"] = pd.to_datetime(caract["date"].dt.strftime("%Y-%m-%d") + " " + caract["hrmn"], errors="coerce")
     caract["latitude"] = pd.to_numeric(caract["lat"].astype(str).str.replace(",", "."), errors="coerce")
     caract["longitude"] = pd.to_numeric(caract["long"].astype(str).str.replace(",", "."), errors="coerce")
 
-    # Traitement des Sentinelles (-1)
     for df in [lieux, usagers, vehicules]:
-        num_cols = df.select_dtypes(include=np.number).columns
-        for col in num_cols:
+        for col in df.select_dtypes(include=np.number).columns:
             if col not in ["Num_Acc", "id_usager", "id_vehicule"]:
-                df.loc[df[col] == -1, col] = np.nan
+                df[col] = df[col].replace(-1, np.nan)
 
-    # Déduplication stricte
     lieux = lieux.drop_duplicates(subset=["Num_Acc"], keep="first")
 
-    # ---------------------------------------------------------
-    # FEATURE ENGINEERING (Préparation ML)
-    # ---------------------------------------------------------
-    usagers["age"] = 2024 - pd.to_numeric(usagers["an_nais"], errors="coerce")
-    caract["heure"] = caract["datetime"].dt.hour
-
-    # Contournement robuste de l'erreur locale : Mapping manuel
-    caract["jour_semaine_en"] = caract["datetime"].dt.day_name()
-    caract["jour_semaine"] = caract["jour_semaine_en"].map(JOURS_FR)
-
-    caract["time_of_day"] = pd.cut(caract["heure"], bins=[0, 6, 12, 18, 24], labels=["Nuit", "Matin", "Après-midi", "Soirée"], right=False)
-
-    # Target Variable : Index de sévérité globale du sinistre
+    caract["time_of_day"] = pd.cut(caract["datetime"].dt.hour, bins=[0, 6, 12, 18, 24], labels=["Nuit", "Matin", "Après-midi", "Soirée"], right=False)
+    usagers["age"] = 2024 - usagers["an_nais"]
     worst_injury = usagers.groupby("Num_Acc")["grav"].max().rename("severity_index")
     caract = caract.merge(worst_injury, on="Num_Acc", how="left")
 
-    # ---------------------------------------------------------
-    # GOLD : Modélisation Dimensionnelle
-    # ---------------------------------------------------------
-    # Table de faits
-    fact = caract[["Num_Acc", "datetime", "heure", "time_of_day", "jour_semaine", "latitude", "longitude", "lum", "atm", "severity_index"]].copy()
-    fact = fact.merge(lieux[["Num_Acc", "catr", "vma", "surf", "prof"]], on="Num_Acc", how="left")
+    # --- MODÈLE (GOLD) ---
+    fact = caract[["Num_Acc", "datetime", "time_of_day", "latitude", "longitude", "lum", "atm", "severity_index"]].copy()
+    fact = fact.merge(lieux[["Num_Acc", "catr", "vma"]], on="Num_Acc", how="left")
 
-    # Agrégations
     nb_veh = vehicules.groupby("Num_Acc").size().rename("nb_vehicules")
     nb_usg = usagers.groupby("Num_Acc").size().rename("nb_personnes")
     fact = fact.merge(nb_veh, on="Num_Acc", how="left").merge(nb_usg, on="Num_Acc", how="left")
 
-    # Mapping métier pour BI
     fact["Luminosité"] = fact["lum"].map(LUM_LABELS).fillna("Inconnu")
     fact["Météo"] = fact["atm"].map(ATM_LABELS).fillna("Inconnu")
     fact["Type_Route"] = fact["catr"].map(CATR_LABELS).fillna("Inconnu")
     fact["Sévérité"] = fact["severity_index"].map(GRAV_LABELS).fillna("Inconnu")
 
-    # Tables de dimensions
-    dim_veh = vehicules[["id_vehicule", "Num_Acc", "catv", "obs", "choc", "motor"]].copy()
-    dim_veh["Categorie"] = dim_veh["catv"].map(CATV_LABELS).fillna("Autre")
+    dim_vehicule = vehicules[["id_vehicule", "Num_Acc", "catv"]].copy()
+    dim_vehicule["Categorie"] = dim_vehicule["catv"].map(CATV_LABELS).fillna("Autre")
 
-    dim_usg = usagers[["id_usager", "Num_Acc", "catu", "grav", "age", "sexe", "trajet", "secu1"]].copy()
-    dim_usg["Role"] = dim_usg["catu"].map(CATU_LABELS).fillna("Inconnu")
-    dim_usg["Sexe_Label"] = dim_usg["sexe"].map(SEXE_LABELS).fillna("Inconnu")
+    dim_usager = usagers[["id_usager", "Num_Acc", "catu", "grav", "age", "sexe"]].copy()
+    dim_usager["Role"] = dim_usager["catu"].map(CATU_LABELS).fillna("Inconnu")
 
-    return fact, dim_veh, dim_usg
+    return fact, dim_vehicule, dim_usager
 
 # ======================================================================
-# INITIALISATION ET CHARGEMENT
+# INTERFACE PRINCIPALE
 # ======================================================================
+st.title("🚦 Analyse Exploratoire & Accidentologie (2024)")
+
 try:
-    raw_data, mem_init, mem_fin, t_exec = load_and_optimize_raw_data()
-    fact_acc, dim_veh, dim_usg = execute_etl_pipeline(raw_data)
+    raw_data = load_raw_data()
+    profiling = deep_data_profiling(raw_data)
+    fact_acc, dim_veh, dim_usg = process_pipeline(raw_data)
 except FileNotFoundError:
-    st.error("⚠️ Fichiers CSV introuvables. Vérifiez le répertoire source.")
+    st.error("⚠️ Fichiers CSV introuvables. Vérifiez la présence des 4 fichiers à la racine.")
     st.stop()
 
-# ======================================================================
-# INTERFACE UTILISATEUR
-# ======================================================================
-st.title("🚦 Pipeline Data & Intelligence Artificielle - Accidentologie")
-st.markdown("Une plateforme analytique bout-en-bout : de l'audit de qualité des données brutes jusqu'à l'exploration multidimensionnelle préparatoire au Machine Learning.")
-
-tab_profiling, tab_univariate, tab_multivariate, tab_dashboard = st.tabs([
-    "🛠️ Data Profiling & ETL",
-    "📈 EDA : Univariée",
-    "🔗 EDA : Bivariée & Corrélations",
-    "📊 Business Intelligence"
-])
+tab_dq, tab_dash = st.tabs(["🔬 Exploratory Data Analysis (Data Quality)", "📊 Dashboard Analytique"])
 
 # ----------------------------------------------------------------------
-# ONGLET 1 : DATA PROFILING & PIPELINE ETL
+# ONGLET 1 : DATA QUALITY (EDA)
 # ----------------------------------------------------------------------
-with tab_profiling:
-    st.header("1. Métriques du Pipeline et Qualité de Données")
+with tab_dq:
+    st.header("Analyse Exploratoire et Qualité des Données (EDA)")
+    st.markdown("Cette section présente l'audit approfondi du jeu de données brut avant toute transformation, mettant en évidence les biais potentiels pour la modélisation.")
 
-    st.subheader("1.1. Performances d'Extraction (Data Engineering)")
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Temps d'exécution IO", f"{t_exec:.2f} s")
-    m2.metric("Empreinte RAM Initiale", f"{mem_init:.1f} MB")
-    m3.metric("Empreinte RAM Optimisée", f"{mem_fin:.1f} MB", delta=f"-{((mem_init-mem_fin)/mem_init)*100:.1f}%", delta_color="inverse")
+    # 1. Volumétrie
+    st.subheader("1. Vue d'ensemble & Cardinalité")
+    vol_df = pd.DataFrame.from_dict(profiling["volumetrie"], orient="index")
+    vol_df.columns = ["Lignes", "Colonnes", "Accidents Uniques (Num_Acc)"]
+    st.dataframe(vol_df, use_container_width=True)
 
     st.markdown("---")
 
-    st.subheader("1.2. Cartographie de la Sparsité (Missing Values)")
-    st.markdown("Analyse de la complétude du dataset après conversion des anomalies sentinelles (`-1`). Crucial pour déterminer la stratégie d'imputation (SimpleImputer, KNNImputer).")
+    # 2. Complétude
+    st.subheader("2. Analyse de la Complétude (Missing Values)")
+    st.markdown("La gestion des valeurs manquantes est critique. Ici, les non-réponses sont souvent encodées par la valeur sentinelle `-1`. Le graphique ci-dessous fusionne les `NaN` natifs et les `-1` pour révéler le véritable taux de données inexploitables par table.")
 
-    def calculate_sparsity(df):
-        missing = (df.isna().sum() / len(df)) * 100
-        return missing[missing > 0].sort_values(ascending=False)
+    all_missing = []
+    for table_name, df_miss in profiling["missing"].items():
+        for col, row in df_miss.iterrows():
+            if row["%_Incomplet"] > 5:  # On n'affiche que les colonnes > 5% manquants pour la lisibilité
+                all_missing.append({"Table": table_name, "Colonne": col, "% Incomplet": row["%_Incomplet"]})
 
-    col_s1, col_s2, col_s3 = st.columns(3)
-    with col_s1:
-        st.write("**Lieux (Sparsité > 0%)**")
-        st.dataframe(calculate_sparsity(raw_data["lieux"]).to_frame(name="% NaN"), use_container_width=True)
-    with col_s2:
-        st.write("**Usagers (Sparsité > 0%)**")
-        st.dataframe(calculate_sparsity(raw_data["usagers"]).to_frame(name="% NaN"), use_container_width=True)
-    with col_s3:
-        st.write("**Véhicules (Sparsité > 0%)**")
-        st.dataframe(calculate_sparsity(raw_data["vehicules"]).to_frame(name="% NaN"), use_container_width=True)
-
-# ----------------------------------------------------------------------
-# ONGLET 2 : ANALYSE UNIVARIÉE (STATISTIQUES DESCRIPTIVES)
-# ----------------------------------------------------------------------
-with tab_univariate:
-    st.header("2. Analyse Descriptive Univariée")
-    st.markdown("Étude des distributions marginales pour identifier les asymétries (Skewness) et les valeurs aberrantes (Outliers).")
-
-    c_uni1, c_uni2 = st.columns(2)
-
-    with c_uni1:
-        st.subheader("Distribution Démographique (Âge)")
-        fig_age = px.histogram(
-            dim_usg, x="age", nbins=80,
-            title="Histogramme & Boxplot de l'Âge",
-            marginal="box", color_discrete_sequence=["#2ca02c"]
+    if all_missing:
+        miss_df = pd.DataFrame(all_missing).sort_values("% Incomplet", ascending=False)
+        fig_miss = px.bar(
+            miss_df, x="% Incomplet", y="Colonne", color="Table", orientation="h",
+            title="Colonnes présentant plus de 5% de valeurs manquantes ou sentinelles (-1)",
+            height=400
         )
-        # Indicateurs statistiques
-        mean_age = dim_usg["age"].mean()
-        median_age = dim_usg["age"].median()
-        fig_age.add_vline(x=mean_age, line_dash="dash", line_color="red", annotation_text="Moyenne")
-        fig_age.add_vline(x=median_age, line_dash="dot", line_color="blue", annotation_text="Médiane")
-        st.plotly_chart(fig_age, use_container_width=True)
-        st.caption(f"Statistiques : Moyenne = {mean_age:.1f} ans | Médiane = {median_age:.1f} ans. La présence de valeurs négatives ou > 100 ans a été identifiée.")
+        fig_miss.update_layout(yaxis={'categoryorder':'total ascending'})
+        st.plotly_chart(fig_miss, use_container_width=True)
 
-    with c_uni2:
-        st.subheader("Distribution des Vitesses Autorisées (VMA)")
-        vma_counts = fact_acc["vma"].value_counts().reset_index()
-        vma_counts.columns = ["Vitesse", "Fréquence"]
-        vma_counts = vma_counts[vma_counts["Vitesse"] <= 130] # Filtrage des aberrations évidentes
+    st.markdown("---")
 
-        fig_vma = px.bar(
-            vma_counts.head(10), x="Vitesse", y="Fréquence",
-            title="Top 10 des VMA les plus fréquentes (≤ 130 km/h)",
-            text_auto=".2s", color="Vitesse", color_continuous_scale="Blues"
-        )
-        fig_vma.update_xaxes(type='category')
-        st.plotly_chart(fig_vma, use_container_width=True)
+    # 3. Outliers & Validité
+    st.subheader("3. Validité Métier & Valeurs Aberrantes (Outliers)")
+    c1, c2 = st.columns(2)
 
-# ----------------------------------------------------------------------
-# ONGLET 3 : ANALYSE MULTIVARIÉE & CORRÉLATIONS
-# ----------------------------------------------------------------------
-with tab_multivariate:
-    st.header("3. Interactions des Features et Modélisation")
+    with c1:
+        st.markdown("**Qualité de la Géolocalisation**")
+        st.write(f"- Coordonnées absentes (NaN) : **{profiling['outliers']['coords_manquantes']:,}**")
+        st.write(f"- Coordonnées à (0, 0) : **{profiling['outliers']['coords_nulles']:,}**")
+        st.write(f"- Coordonnées hors limites (Lat/Lon) : **{profiling['outliers']['coords_hors_limites']:,}**")
+        st.info("💡 Les modèles spatiaux nécessiteront un filtrage strict sur les bounding boxes de la France métropolitaine et des DROM-COM.")
 
-    st.subheader("3.1. Matrice de Corrélation (Spearman)")
-    st.markdown("Utilisation de la corrélation de Spearman, plus robuste aux distributions non normales et adaptée aux variables ordinales (Luminosité, Météo, Sévérité).")
+    with c2:
+        st.markdown("**Validité Démographique (Âges)**")
+        st.write(f"- Âges négatifs calculés : **{profiling['outliers']['ages_negatifs']:,}**")
+        st.write(f"- Usagers centenaires (>105 ans) : **{profiling['outliers']['ages_centenaires']:,}**")
+        st.warning("⚠️ Les anomalies démographiques devront être imputées ou exclues lors de la création de features (Feature Engineering).")
 
-    features_numeriques = ["heure", "latitude", "longitude", "lum", "atm", "vma", "nb_vehicules", "nb_personnes", "severity_index"]
-    df_corr = fact_acc[features_numeriques].dropna().corr(method='spearman')
+    st.markdown("---")
 
-    fig_corr = go.Figure(data=go.Heatmap(
-        z=df_corr.values,
-        x=df_corr.columns, y=df_corr.index,
-        colorscale='RdBu_r', zmin=-1, zmax=1,
-        text=np.round(df_corr.values, 2), texttemplate="%{text}",
-        hoverinfo="z"
-    ))
-    fig_corr.update_layout(height=600)
-    st.plotly_chart(fig_corr, use_container_width=True)
+    # 4. Intégrité
+    st.subheader("4. Intégrité Structurelle & Référentielle")
+    i1, i2 = st.columns(2)
 
-    st.subheader("3.2. Analyse des Facteurs de Sévérité (Violin Plots)")
-    c_vio1, c_vio2 = st.columns(2)
-    with c_vio1:
-        fig_vio_veh = px.violin(fact_acc.dropna(subset=['severity_index']), x="Sévérité", y="nb_vehicules", box=True, title="Nombre de véhicules vs Gravité")
-        st.plotly_chart(fig_vio_veh, use_container_width=True)
-    with c_vio2:
-        fig_vio_usg = px.violin(fact_acc.dropna(subset=['severity_index']), x="Sévérité", y="nb_personnes", box=True, title="Nombre de victimes vs Gravité")
-        st.plotly_chart(fig_vio_usg, use_container_width=True)
+    with i1:
+        st.markdown("**Anomalie de la table `lieux`**")
+        st.error(f"Structure de données défectueuse détectée : **{profiling['lieux_duplicates']['accidents_multiples']:,}** accidents possèdent plusieurs lignes de description (jusqu'à {profiling['lieux_duplicates']['max_lignes_pour_un_acc']} lignes pour un seul `Num_Acc`). **Action requise :** Déduplication stricte avant jointure pour éviter l'explosion combinatoire.")
+
+    with i2:
+        st.markdown("**Clés étrangères (Orphelins)**")
+        ref_df = pd.DataFrame.from_dict(profiling["orphans"], orient="index", columns=["Lignes sans correspondance parent"])
+        st.dataframe(ref_df, use_container_width=True)
+        if ref_df["Lignes sans correspondance parent"].sum() == 0:
+            st.success("✅ Intégrité relationnelle validée : toutes les clés enfants pointent vers un accident existant.")
 
 # ----------------------------------------------------------------------
-# ONGLET 4 : DASHBOARD BUSINESS INTELLIGENCE
+# ONGLET 2 : DASHBOARD
 # ----------------------------------------------------------------------
-with tab_dashboard:
-    st.sidebar.header("Moteur de Rendu (Filtres)")
+with tab_dash:
+    st.sidebar.header("Filtres Analytiques")
 
-    f_gravite = st.sidebar.multiselect("Niveau de Sévérité", options=GRAV_LABELS.values(), default=list(GRAV_LABELS.values()))
-    f_route = st.sidebar.multiselect("Typologie du Réseau", options=CATR_LABELS.values(), default=list(CATR_LABELS.values()))
-    f_jour = st.sidebar.multiselect("Jour de la Semaine", options=list(JOURS_FR.values()), default=list(JOURS_FR.values()))
+    grav_options = sorted(fact_acc["Sévérité"].dropna().unique())
+    gravite_filter = st.sidebar.multiselect("Sévérité de l'accident", options=grav_options, default=grav_options)
 
-    df_bi = fact_acc[
-        (fact_acc["Sévérité"].isin(f_gravite)) &
-        (fact_acc["Type_Route"].isin(f_route)) &
-        (fact_acc["jour_semaine"].isin(f_jour))
+    time_options = ["Matin", "Après-midi", "Soirée", "Nuit"]
+    moment_filter = st.sidebar.multiselect("Moment de la journée", options=time_options, default=time_options)
+
+    filtered_fact = fact_acc[
+        (fact_acc["Sévérité"].isin(gravite_filter)) &
+        (fact_acc["time_of_day"].isin(moment_filter))
     ]
 
-    st.header("4. Dashboard Décisionnel Interactif")
+    st.header("Dashboard Analytique des Accidents")
 
-    # Indicateurs Macro
+    # KPIs
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Accidents Comptabilisés", f"{len(df_bi):,}")
-    k2.metric("Personnes Impliquées", f"{df_bi['nb_personnes'].sum():,.0f}")
-    k3.metric("Véhicules Impliqués", f"{df_bi['nb_vehicules'].sum():,.0f}")
-    tx_mort = (df_bi["severity_index"] == 2).mean() * 100 if len(df_bi) > 0 else 0
-    k4.metric("Taux de Létalité", f"{tx_mort:.2f}%")
+    k1.metric("Accidents filtrés", f"{len(filtered_fact):,}")
+    k2.metric("Personnes Impliquées", f"{filtered_fact['nb_personnes'].sum():,.0f}")
+    k3.metric("Véhicules Impliqués", f"{filtered_fact['nb_vehicules'].sum():,.0f}")
+    pct_mortal = (filtered_fact["severity_index"] == 2).mean() * 100 if len(filtered_fact) > 0 else 0
+    k4.metric("Taux de Mortalité", f"{pct_mortal:.1f}%")
 
     st.markdown("---")
 
-    col_g1, col_g2 = st.columns([1.5, 1])
+    col_chart1, col_chart2 = st.columns(2)
 
-    with col_g1:
-        st.subheader("Concentration Temporelle (Heatmap Croisée)")
-        # Génération d'une matrice croisée Jours x Heures
-        pivot_t = df_bi.pivot_table(index="jour_semaine", columns="heure", values="Num_Acc", aggfunc="count").fillna(0)
-        jours_ordonnes = list(JOURS_FR.values())
-        pivot_t = pivot_t.reindex(jours_ordonnes)
-
-        fig_heat_time = px.imshow(
-            pivot_t,
-            labels=dict(x="Heure de la journée", y="Jour de la semaine", color="Volumétrie"),
-            x=pivot_t.columns, y=pivot_t.index,
-            color_continuous_scale="Magma", aspect="auto"
+    with col_chart1:
+        st.subheader("Typologie du Réseau Routier")
+        fig_route = px.bar(
+            filtered_fact["Type_Route"].value_counts().reset_index(),
+            x="Type_Route", y="count", color="Type_Route",
+            labels={"count": "Volume", "Type_Route": "Réseau"}
         )
-        st.plotly_chart(fig_heat_time, use_container_width=True)
+        fig_route.update_layout(showlegend=False)
+        st.plotly_chart(fig_route, use_container_width=True)
 
-    with col_g2:
-        st.subheader("Répartition des Véhicules")
-        veh_bi = dim_veh[dim_veh["Num_Acc"].isin(df_bi["Num_Acc"])]
-        veh_counts = veh_bi["Categorie"].value_counts().reset_index()
-        veh_counts.columns = ["Catégorie", "Volume"]
-        fig_pie = px.pie(veh_counts.head(8), names="Catégorie", values="Volume", hole=0.4, color_discrete_sequence=px.colors.qualitative.Set3)
-        st.plotly_chart(fig_pie, use_container_width=True)
+    with col_chart2:
+        st.subheader("Impact des Conditions Météorologiques")
+        sev_meteo = filtered_fact.groupby("Météo")["severity_index"].mean().reset_index().sort_values("severity_index", ascending=False)
+        fig_meteo = px.bar(
+            sev_meteo, x="Météo", y="severity_index", color="severity_index",
+            color_continuous_scale="Reds", labels={"severity_index": "Indice de Gravité Moyen"}
+        )
+        st.plotly_chart(fig_meteo, use_container_width=True)
 
-    st.markdown("---")
-
-    st.subheader("Analyse Spatiale et Clustering (France Métropolitaine)")
-    st.markdown("Cartographie des points de collision. Affichage limité à un échantillon aléatoire (Max 10 000 points) pour garantir les performances du navigateur web.")
-
-    map_df = df_bi.dropna(subset=["latitude", "longitude"])
+    # Carte Mapbox (Filtrée sur la métropole pour lisibilité)
+    st.subheader("Cartographie des Sinistres")
+    map_df = filtered_fact.dropna(subset=["latitude", "longitude"])
     map_df = map_df[(map_df["latitude"].between(41, 51.5)) & (map_df["longitude"].between(-5.5, 10))]
 
     if not map_df.empty:
         fig_map = px.scatter_map(
-            map_df.sample(min(10000, len(map_df)), random_state=42),
-            lat="latitude", lon="longitude",
-            color="Sévérité", size="nb_personnes",
-            color_discrete_map={"Indemne": "green", "Blessé léger": "yellow", "Blessé hospitalisé": "orange", "Tué": "red", "Inconnu": "gray"},
-            zoom=5, height=600,
-            hover_data=["Type_Route", "heure", "Météo"],
-            map_style="carto-positron"
+            map_df.sample(min(4000, len(map_df)), random_state=42),
+            lat="latitude", lon="longitude", color="Sévérité",
+            zoom=4.5, height=500, hover_data=["Type_Route", "time_of_day"]
         )
         fig_map.update_layout(margin={"r":0,"t":0,"l":0,"b":0})
         st.plotly_chart(fig_map, use_container_width=True)
     else:
-        st.warning("Volume de données géospatiales insuffisant avec les filtres actuels.")
+        st.warning("Aucune donnée géographique exploitable pour cette sélection.")
