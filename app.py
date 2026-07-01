@@ -1,468 +1,296 @@
-import streamlit as st
+"""
+Tableau de bord Streamlit - Sécurité Routière France (2024)
+------------------------------------------------------
+Architecture Medallion : Audit (Bronze) & Analytique (Gold)
+"""
+
 import pandas as pd
 import numpy as np
+import streamlit as st
 import plotly.express as px
-import plotly.graph_objects as go
-import os
-import time
 
-# ======================================================================
-# CONFIGURATION & STYLE
-# ======================================================================
+# ----------------------------------------------------------------------
+# Configuration
+# ----------------------------------------------------------------------
 st.set_page_config(
-    page_title="Audit Data Quality - Sécurité Routière",
-    page_icon="🔬",
+    page_title="Sécurité Routière - EDA & Dashboard",
+    page_icon="🚦",
     layout="wide",
-    initial_sidebar_state="expanded"
 )
 
-# CSS Custom pour un rendu professionnel
-st.markdown("""
-<style>
-    .main .block-container {
-        padding-top: 2rem;
-        padding-bottom: 2rem;
-        max-width: 1300px;
-    }
-    .stMetric {
-        background-color: #f8f9fa;
-        border: 1px solid #e9ecef;
-        padding: 12px;
-        border-radius: 8px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
-    }
-    .stMetric label {
-        color: #495057 !important;
-        font-weight: 600 !important;
-    }
-    .stMetric [data-testid="stMetricValue"] {
-        color: #212529 !important;
-    }
-    h1, h2, h3 {
-        color: #2c3e50;
-        font-weight: 700;
-    }
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 8px;
-    }
-    .stTabs [data-baseweb="tab"] {
-        height: 50px;
-        padding: 10px 20px;
-        background-color: #f1f3f5;
-        border-radius: 8px 8px 0 0;
-        font-weight: 600;
-        color: #495057;
-    }
-    .stTabs [aria-selected="true"] {
-        background-color: #ffffff !important;
-        color: #0d6efd !important;
-        border-bottom: 2px solid #0d6efd !important;
-    }
-    .alert-box {
-        padding: 15px;
-        border-radius: 8px;
-        margin-bottom: 15px;
-        border-left: 5px solid;
-    }
-    .alert-info { background-color: #e7f1ff; border-color: #0d6efd; color: #084298; }
-    .alert-warning { background-color: #fff3cd; border-color: #ffc107; color: #664d03; }
-    .alert-danger { background-color: #f8d7da; border-color: #dc3545; color: #842029; }
-</style>
-""", unsafe_allow_html=True)
-
-px.defaults.template = "plotly_white"
-px.defaults.color_discrete_sequence = ["#0d6efd", "#dc3545", "#198754", "#ffc107", "#6f42c1"]
+# ----------------------------------------------------------------------
+# Dictionnaires de référence complets
+# ----------------------------------------------------------------------
+LUM_LABELS = {1: "Plein jour", 2: "Crépuscule/Aube", 3: "Nuit (sans éclairage)", 4: "Nuit (éclairage éteint)", 5: "Nuit (éclairage allumé)"}
+ATM_LABELS = {1: "Normale", 2: "Pluie légère", 3: "Pluie forte", 4: "Neige/Grêle", 5: "Brouillard/Fumée", 6: "Vent fort", 7: "Temps éblouissant", 8: "Couvert", 9: "Autre"}
+CATR_LABELS = {1: "Autoroute", 2: "Route Nationale", 3: "Route Départementale", 4: "Voie Communale", 5: "Hors réseau public", 6: "Parc de stationnement", 9: "Autre"}
+CATU_LABELS = {1: "Conducteur", 2: "Passager", 3: "Piéton"}
+GRAV_LABELS = {1: "Indemne", 2: "Tué", 3: "Blessé hospitalisé", 4: "Blessé léger"}
+CATV_LABELS = {1: "Vélo", 2: "Cyclomoteur", 7: "Voiture", 10: "Véhicule utilitaire", 13: "Poids lourd (<7.5t)", 14: "Poids lourd (>=7.5t)", 30: "Scooter", 33: "Moto", 37: "Bus", 38: "Autocar"}
 
 # ======================================================================
-# CHARGEMENT DES DONNÉES (COUCHE BRONZE)
+# COUCHE BRONZE : Chargement
 # ======================================================================
-@st.cache_data(show_spinner="Chargement et audit du schéma brut...")
-def load_bronze_data():
-    files = {
-        "caract": "caract-2024.csv",
-        "lieux": "lieux-2024.csv",
-        "usagers": "usagers-2024.csv",
-        "vehicules": "vehicules-2024.csv"
-    }
-    data = {}
-    for key, file in files.items():
-        if os.path.exists(file):
-            try:
-                df = pd.read_csv(file, sep=";", encoding="utf-8", low_memory=False)
-                data[key] = df
-            except Exception:
-                data[key] = pd.DataFrame()
-        else:
-            data[key] = pd.DataFrame()
-    return data
-
-# ======================================================================
-# FONCTIONS D'AUDIT (DATA PROFILING)
-# ======================================================================
-@st.cache_data
-def analyze_sentinels(_df):
-    """Détecte les valeurs sentinelles '-1' typiques du jeu de données BAAC."""
-    sentinels = {}
-    for col in _df.columns:
-        if col not in ['Num_Acc', 'id_usager', 'id_vehicule']:
-            # Conversion en string pour capturer les -1 numériques et textuels
-            count = (_df[col].astype(str).str.strip() == '-1').sum()
-            if count > 0:
-                sentinels[col] = count
-    return pd.Series(sentinels).sort_values(ascending=False)
-
-@st.cache_data
-def analyze_gps(_df):
-    """Analyse la qualité des coordonnées GPS (problème de la virgule)."""
-    if 'lat' not in _df.columns or 'long' not in _df.columns:
-        return None
-
-    lat_raw = _df['lat'].astype(str)
-    lon_raw = _df['long'].astype(str)
-
-    # Problème de format (virgule au lieu du point)
-    comma_lat = lat_raw.str.contains(',').sum()
-    comma_lon = lon_raw.str.contains(',').sum()
-
-    # Nettoyage temporaire pour vérification
-    lat_clean = pd.to_numeric(lat_raw.str.replace(',', '.'), errors='coerce')
-    lon_clean = pd.to_numeric(lon_raw.str.replace(',', '.'), errors='coerce')
-
-    nulls = lat_clean.isna().sum()
-    zeros = ((lat_clean == 0) & (lon_clean == 0)).sum()
-
-    # Vérification bounding box France Métropolitaine
-    metro_mask = (lat_clean.between(41.0, 51.5)) & (lon_clean.between(-5.5, 10.0))
-    valid_metro = (metro_mask & lat_clean.notna() & (lat_clean != 0)).sum()
-    outside = (lat_clean.notna() & (lat_clean != 0) & ~metro_mask).sum()
-
+@st.cache_data(show_spinner="Chargement des données brutes...")
+def load_raw_data():
     return {
-        "comma_lat": int(comma_lat), "comma_lon": int(comma_lon),
-        "nulls": int(nulls), "zeros": int(zeros),
-        "valid_metro": int(valid_metro), "outside": int(outside)
+        "caracteristiques": pd.read_csv("caract-2024.csv", sep=";", encoding="utf-8", low_memory=False),
+        "lieux": pd.read_csv("lieux-2024.csv", sep=";", encoding="utf-8", low_memory=False),
+        "usagers": pd.read_csv("usagers-2024.csv", sep=";", encoding="utf-8", low_memory=False),
+        "vehicules": pd.read_csv("vehicules-2024.csv", sep=";", encoding="utf-8", low_memory=False)
     }
 
-@st.cache_data
-def analyze_lieux_structure(_df):
-    """Détecte les doublons dans la table lieux (1 accident = plusieurs lignes)."""
-    if _df.empty or 'Num_Acc' not in _df.columns:
-        return None
-    counts = _df['Num_Acc'].value_counts()
-    multi = counts[counts > 1]
-    return {
-        "total_accidents": len(counts),
-        "multi_rows": len(multi),
-        "max_rows": int(counts.max()) if len(counts) > 0 else 0,
-        "total_extra_rows": int(multi.sum() - len(multi)) if len(multi) > 0 else 0
+# ======================================================================
+# PROFILING & QUALITÉ DES DONNÉES (Inspiré du Notebook)
+# ======================================================================
+@st.cache_data(show_spinner="Analyse de la qualité en profondeur...")
+def deep_data_profiling(_raw):
+    profiling = {}
+
+    # 1. Volumétrie et Cardinalité
+    profiling["volumetrie"] = {k: {"lignes": v.shape[0], "cols": v.shape[1], "acc_uniques": v["Num_Acc"].nunique()} for k, v in _raw.items()}
+
+    # 2. Analyse de la complétude (Vrais NaN + Sentinelles -1 + Vides)
+    missing_stats = {}
+    for name, df in _raw.items():
+        n = len(df)
+        df_na = pd.DataFrame(index=df.columns)
+        df_na["NaN_Classiques"] = df.isna().sum()
+        df_na["Sentinelles_(-1)"] = (df.astype(str).apply(lambda x: x.str.strip() == "-1")).sum()
+        df_na["Total_Manquant"] = df_na["NaN_Classiques"] + df_na["Sentinelles_(-1)"]
+        df_na["%_Incomplet"] = (df_na["Total_Manquant"] / n * 100).round(2)
+        missing_stats[name] = df_na[df_na["Total_Manquant"] > 0].sort_values("%_Incomplet", ascending=False)
+    profiling["missing"] = missing_stats
+
+    # 3. Valeurs Aberrantes (Outliers)
+    caract = _raw["caracteristiques"]
+    usagers = _raw["usagers"]
+
+    # Géolocalisation
+    lat = pd.to_numeric(caract["lat"].astype(str).str.replace(",", "."), errors="coerce")
+    lon = pd.to_numeric(caract["long"].astype(str).str.replace(",", "."), errors="coerce")
+
+    profiling["outliers"] = {
+        "coords_nulles": int(((lat == 0) & (lon == 0)).sum()),
+        "coords_hors_limites": int(((lat < -90) | (lat > 90) | (lon < -180) | (lon > 180)).sum()),
+        "coords_manquantes": int(lat.isna().sum())
     }
 
-@st.cache_data
-def analyze_age_logic(_df):
-    """Vérifie la cohérence de l'année de naissance pour le calcul d'âge."""
-    if _df.empty or 'an_nais' not in _df.columns:
-        return None
+    # Âges
+    ages = 2024 - pd.to_numeric(usagers["an_nais"], errors="coerce")
+    profiling["outliers"]["ages_negatifs"] = int((ages < 0).sum())
+    profiling["outliers"]["ages_centenaires"] = int((ages > 105).sum())
 
-    an_nais = pd.to_numeric(_df['an_nais'], errors='coerce')
-    ages = 2024 - an_nais
-
-    return {
-        "negatifs": int((ages < 0).sum()),
-        "centenaires": int((ages > 105).sum()),
-        "manquants": int(ages.isna().sum()),
-        "valides": int(((ages >= 0) & (ages <= 105)).sum())
+    # 4. Intégrité Structurelle (Le problème de la table lieux)
+    lieux = _raw["lieux"]
+    acc_counts = lieux["Num_Acc"].value_counts()
+    profiling["lieux_duplicates"] = {
+        "accidents_multiples": int((acc_counts > 1).sum()),
+        "max_lignes_pour_un_acc": int(acc_counts.max())
     }
+
+    # 5. Intégrité Référentielle (Orphelins)
+    ref_ids = set(caract["Num_Acc"])
+    profiling["orphans"] = {
+        name: len(set(_raw[name]["Num_Acc"]) - ref_ids) for name in ["lieux", "usagers", "vehicules"]
+    }
+
+    return profiling
+
+# ======================================================================
+# PIPELINE SILVER & GOLD
+# ======================================================================
+@st.cache_data(show_spinner="Construction du modèle analytique...")
+def process_pipeline(_raw):
+    caract, lieux, usagers, vehicules = _raw["caracteristiques"].copy(), _raw["lieux"].copy(), _raw["usagers"].copy(), _raw["vehicules"].copy()
+
+    # --- NETTOYAGE (SILVER) ---
+    caract["date"] = pd.to_datetime(caract["an"].astype(str) + "-" + caract["mois"].astype(str) + "-" + caract["jour"].astype(str), errors="coerce")
+    caract["datetime"] = pd.to_datetime(caract["date"].dt.strftime("%Y-%m-%d") + " " + caract["hrmn"], errors="coerce")
+    caract["latitude"] = pd.to_numeric(caract["lat"].astype(str).str.replace(",", "."), errors="coerce")
+    caract["longitude"] = pd.to_numeric(caract["long"].astype(str).str.replace(",", "."), errors="coerce")
+
+    for df in [lieux, usagers, vehicules]:
+        for col in df.select_dtypes(include=np.number).columns:
+            if col not in ["Num_Acc", "id_usager", "id_vehicule"]:
+                df[col] = df[col].replace(-1, np.nan)
+
+    lieux = lieux.drop_duplicates(subset=["Num_Acc"], keep="first")
+
+    caract["time_of_day"] = pd.cut(caract["datetime"].dt.hour, bins=[0, 6, 12, 18, 24], labels=["Nuit", "Matin", "Après-midi", "Soirée"], right=False)
+    usagers["age"] = 2024 - usagers["an_nais"]
+    worst_injury = usagers.groupby("Num_Acc")["grav"].max().rename("severity_index")
+    caract = caract.merge(worst_injury, on="Num_Acc", how="left")
+
+    # --- MODÈLE (GOLD) ---
+    fact = caract[["Num_Acc", "datetime", "time_of_day", "latitude", "longitude", "lum", "atm", "severity_index"]].copy()
+    fact = fact.merge(lieux[["Num_Acc", "catr", "vma"]], on="Num_Acc", how="left")
+
+    nb_veh = vehicules.groupby("Num_Acc").size().rename("nb_vehicules")
+    nb_usg = usagers.groupby("Num_Acc").size().rename("nb_personnes")
+    fact = fact.merge(nb_veh, on="Num_Acc", how="left").merge(nb_usg, on="Num_Acc", how="left")
+
+    fact["Luminosité"] = fact["lum"].map(LUM_LABELS).fillna("Inconnu")
+    fact["Météo"] = fact["atm"].map(ATM_LABELS).fillna("Inconnu")
+    fact["Type_Route"] = fact["catr"].map(CATR_LABELS).fillna("Inconnu")
+    fact["Sévérité"] = fact["severity_index"].map(GRAV_LABELS).fillna("Inconnu")
+
+    dim_vehicule = vehicules[["id_vehicule", "Num_Acc", "catv"]].copy()
+    dim_vehicule["Categorie"] = dim_vehicule["catv"].map(CATV_LABELS).fillna("Autre")
+
+    dim_usager = usagers[["id_usager", "Num_Acc", "catu", "grav", "age", "sexe"]].copy()
+    dim_usager["Role"] = dim_usager["catu"].map(CATU_LABELS).fillna("Inconnu")
+
+    return fact, dim_vehicule, dim_usager
 
 # ======================================================================
 # INTERFACE PRINCIPALE
 # ======================================================================
-st.title("🔬 Audit Data Quality & Profiling (Couche Bronze)")
-st.markdown("""
-<div class="alert-box alert-info">
-<b>Architecture Medallion - Étape 1 : Audit.</b><br>
-Cette application analyse en profondeur les données brutes (Bronze) pour identifier les biais, les erreurs de format et les incohérences structurelles. 
-Ces constats justifient les transformations appliquées dans les pipelines <b>Silver</b> (Nettoyage) et <b>Gold</b> (Modélisation).
-</div>
-""")
+st.title("🚦 Analyse Exploratoire & Accidentologie (2024)")
 
-# Chargement
-raw_data = load_bronze_data()
-
-# Sidebar : État des fichiers
-with st.sidebar:
-    st.header("📂 État des données")
-    for name, df in raw_data.items():
-        if not df.empty:
-            st.success(f"✅ **{name}** : {len(df):,} lignes")
-        else:
-            st.error(f"❌ **{name}** : Vide / Introuvable")
-
-    st.markdown("---")
-    st.markdown("### 🎯 Objectifs de l'audit")
-    st.markdown("""
-    1. **Standardisation** (GPS, Dates)
-    2. **Sentinelles** (Valeurs `-1`)
-    3. **Intégrité** (Doublons `lieux`)
-    4. **Logique Métier** (Âges, Référentiel)
-    """)
-
-if all(df.empty for df in raw_data.values()):
-    st.error("⚠️ Aucun fichier CSV trouvé. Veuillez placer les 4 fichiers à la racine du projet.")
+try:
+    raw_data = load_raw_data()
+    profiling = deep_data_profiling(raw_data)
+    fact_acc, dim_veh, dim_usg = process_pipeline(raw_data)
+except FileNotFoundError:
+    st.error("⚠️ Fichiers CSV introuvables. Vérifiez la présence des 4 fichiers à la racine.")
     st.stop()
 
-# Création des onglets
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "📊 Volumétrie",
-    "🧹 Standardisation & Sentinelles",
-    "🔗 Intégrité Structurelle",
-    "🧠 Logique Métier",
-    "🚀 Pipeline Silver/Gold"
-])
+tab_dq, tab_dash = st.tabs(["🔬 Exploratory Data Analysis (Data Quality)", "📊 Dashboard Analytique"])
 
 # ----------------------------------------------------------------------
-# ONGLET 1 : VOLUMETRIE
+# ONGLET 1 : DATA QUALITY (EDA)
 # ----------------------------------------------------------------------
-with tab1:
-    st.header("📊 Volumétrie et Empreinte Mémoire")
-    st.markdown("Aperçu de la taille des tables et de la cohérence des identifiants (`Num_Acc`).")
+with tab_dq:
+    st.header("Analyse Exploratoire et Qualité des Données (EDA)")
+    st.markdown("Cette section présente l'audit approfondi du jeu de données brut avant toute transformation, mettant en évidence les biais potentiels pour la modélisation.")
 
-    cols = st.columns(4)
-    for i, (name, df) in enumerate(raw_data.items()):
-        with cols[i]:
-            if not df.empty:
-                st.metric(f"Table `{name}`", f"{len(df):,}")
-                st.caption(f"{df.shape[1]} colonnes | {df.memory_usage(deep=True).sum() / 1024**2:.1f} MB")
-            else:
-                st.metric(f"Table `{name}`", "N/A")
-
-    st.markdown("### Cohérence des identifiants (Clé primaire)")
-    if not raw_data['caract'].empty:
-        nb_caract = raw_data['caract']['Num_Acc'].nunique()
-        st.info(f"💡 La table `caract` contient **{nb_caract:,}** accidents uniques. Les tables satellites doivent pointer vers ces mêmes IDs.")
-    st.markdown("---")
-
-# ----------------------------------------------------------------------
-# ONGLET 2 : STANDARDISATION & SENTINELLES
-# ----------------------------------------------------------------------
-with tab2:
-    st.header("🧹 Standardisation & Valeurs Sentinelles")
-
-    c1, c2 = st.columns(2)
-
-    # --- GPS ---
-    with c1:
-        st.subheader("📍 Qualité de la Géolocalisation (GPS)")
-        st.markdown("Dans le format BAAC, les coordonnées sont souvent des textes avec des **virgules** (ex: `48,85`) au lieu de points, ce qui empêche leur utilisation numérique directe.")
-
-        if not raw_data['caract'].empty:
-            gps_stats = analyze_gps(raw_data['caract'])
-            if gps_stats:
-                fig_gps = go.Figure(data=[go.Pie(
-                    labels=['Valide (Métropole)', 'Hors Métropole / DROM', 'Zéros (0,0)', 'Invalides / NaN'],
-                    values=[gps_stats['valid_metro'], gps_stats['outside'], gps_stats['zeros'], gps_stats['nulls']],
-                    hole=.4, marker_colors=["#198754", "#ffc107", "#dc3545", "#6c757d"]
-                )])
-                fig_gps.update_layout(title="Statut des coordonnées (lat/long)", height=350, margin=dict(t=50, b=0, l=0, r=0))
-                st.plotly_chart(fig_gps, use_container_width=True)
-
-                if gps_stats['comma_lat'] > 0:
-                    st.warning(f"⚠️ **{gps_stats['comma_lat']:,}** lignes ont des latitudes avec des virgules. <br>👉 *Action Silver : `str.replace(',', '.')`*", unsafe_allow_html=True)
-
-    # --- SENTINELLES -1 ---
-    with c2:
-        st.subheader("🎭 Détection des Sentinelles (`-1`)")
-        st.markdown("Le jeu de données utilise `-1` pour encoder les valeurs manquantes. Il faut les transformer en `NaN` pour les modèles.")
-
-        all_sentinels = []
-        for table_name, df in raw_data.items():
-            if not df.empty:
-                s = analyze_sentinels(df)
-                for col, count in s.items():
-                    all_sentinels.append({"Table": table_name, "Colonne": col, "Count": count})
-
-        if all_sentinels:
-            sent_df = pd.DataFrame(all_sentinels).sort_values("Count", ascending=False).head(15)
-            fig_sent = px.bar(sent_df, x="Count", y="Colonne", color="Table", orientation='h',
-                              title="Top 15 des colonnes les plus impactées par '-1'")
-            fig_sent.update_layout(yaxis={'categoryorder':'total ascending'}, height=400, margin=dict(t=50, b=0, l=0, r=0))
-            st.plotly_chart(fig_sent, use_container_width=True)
-        else:
-            st.success("Aucune sentinelle '-1' détectée.")
+    # 1. Volumétrie
+    st.subheader("1. Vue d'ensemble & Cardinalité")
+    vol_df = pd.DataFrame.from_dict(profiling["volumetrie"], orient="index")
+    vol_df.columns = ["Lignes", "Colonnes", "Accidents Uniques (Num_Acc)"]
+    st.dataframe(vol_df, use_container_width=True)
 
     st.markdown("---")
 
-    # --- DATES ---
-    st.subheader("📅 Parsing Temporel")
-    if not raw_data['caract'].empty:
-        st.markdown("Fusion des colonnes `jour`, `mois`, `an`, `hrmn` en un objet `datetime` unique.")
-        try:
-            # Simulation du parsing
-            date_str = raw_data['caract']['an'].astype(str) + "-" + raw_data['caract']['mois'].astype(str) + "-" + raw_data['caract']['jour'].astype(str)
-            dates = pd.to_datetime(date_str, errors='coerce')
-            invalid_dates = dates.isna().sum()
+    # 2. Complétude
+    st.subheader("2. Analyse de la Complétude (Missing Values)")
+    st.markdown("La gestion des valeurs manquantes est critique. Ici, les non-réponses sont souvent encodées par la valeur sentinelle `-1`. Le graphique ci-dessous fusionne les `NaN` natifs et les `-1` pour révéler le véritable taux de données inexploitables par table.")
 
-            m1, m2 = st.columns(2)
-            m1.metric("Dates invalides/impossibles", f"{invalid_dates:,}")
-            m2.metric("Taux de conversion", f"{(1 - invalid_dates/len(raw_data['caract']))*100:.2f} %")
+    all_missing = []
+    for table_name, df_miss in profiling["missing"].items():
+        for col, row in df_miss.iterrows():
+            if row["%_Incomplet"] > 5:  # On n'affiche que les colonnes > 5% manquants pour la lisibilité
+                all_missing.append({"Table": table_name, "Colonne": col, "% Incomplet": row["%_Incomplet"]})
 
-            if invalid_dates > 0:
-                st.warning(f"⚠️ **{invalid_dates:,}** dates ne peuvent pas être parsées (ex: jour=31 dans un mois de 30 jours). Elles deviendront `NaT` en Silver.")
-        except Exception:
-            st.error("Impossible d'analyser les dates (colonnes manquantes).")
+    if all_missing:
+        miss_df = pd.DataFrame(all_missing).sort_values("% Incomplet", ascending=False)
+        fig_miss = px.bar(
+            miss_df, x="% Incomplet", y="Colonne", color="Table", orientation="h",
+            title="Colonnes présentant plus de 5% de valeurs manquantes ou sentinelles (-1)",
+            height=400
+        )
+        fig_miss.update_layout(yaxis={'categoryorder':'total ascending'})
+        st.plotly_chart(fig_miss, use_container_width=True)
 
-# ----------------------------------------------------------------------
-# ONGLET 3 : INTÉGRITÉ STRUCTURELLE
-# ----------------------------------------------------------------------
-with tab3:
-    st.header("🔗 Intégrité Structurelle & Référentielle")
+    st.markdown("---")
 
+    # 3. Outliers & Validité
+    st.subheader("3. Validité Métier & Valeurs Aberrantes (Outliers)")
     c1, c2 = st.columns(2)
 
     with c1:
-        st.subheader("🔁 Le problème de la table `lieux`")
-        st.markdown("Un accident (`Num_Acc`) peut se dérouler à la jonction de plusieurs routes ou concerner plusieurs tronçons. La table `lieux` contient donc **plusieurs lignes par accident**.")
-
-        if not raw_data['lieux'].empty:
-            struct = analyze_lieux_structure(raw_data['lieux'])
-            if struct:
-                st.metric("Accidents avec >1 ligne", f"{struct['multi_rows']:,}")
-                st.metric("Lignes 'doublons' totales", f"{struct['total_extra_rows']:,}")
-                st.metric("Max lignes pour 1 accident", f"{struct['max_rows']:,}")
-
-                if struct['multi_rows'] > 0:
-                    st.error(f"🚨 **Risque d'explosion combinatoire** : Si vous joignez `lieux` sans déduplication, vous multiplierez artificiellement les accidents. <br>👉 *Action Silver : `drop_duplicates(subset=['Num_Acc'], keep='first')`*", unsafe_allow_html=True)
-
-                # Distribution
-                counts = raw_data['lieux']['Num_Acc'].value_counts()
-                fig_hist = px.histogram(counts, nbins=20, title="Distribution du nombre de lignes par accident", labels={"value": "Nombre d'accidents", "count": "Lignes dans lieux"})
-                st.plotly_chart(fig_hist, use_container_width=True)
+        st.markdown("**Qualité de la Géolocalisation**")
+        st.write(f"- Coordonnées absentes (NaN) : **{profiling['outliers']['coords_manquantes']:,}**")
+        st.write(f"- Coordonnées à (0, 0) : **{profiling['outliers']['coords_nulles']:,}**")
+        st.write(f"- Coordonnées hors limites (Lat/Lon) : **{profiling['outliers']['coords_hors_limites']:,}**")
+        st.info("💡 Les modèles spatiaux nécessiteront un filtrage strict sur les bounding boxes de la France métropolitaine et des DROM-COM.")
 
     with c2:
-        st.subheader("🔑 Intégrité Référentielle (Orphelins)")
-        st.markdown("Vérification que chaque ligne des tables satellites (`lieux`, `usagers`, `vehicules`) pointe bien vers un accident existant dans `caract`.")
+        st.markdown("**Validité Démographique (Âges)**")
+        st.write(f"- Âges négatifs calculés : **{profiling['outliers']['ages_negatifs']:,}**")
+        st.write(f"- Usagers centenaires (>105 ans) : **{profiling['outliers']['ages_centenaires']:,}**")
+        st.warning("⚠️ Les anomalies démographiques devront être imputées ou exclues lors de la création de features (Feature Engineering).")
 
-        if not raw_data['caract'].empty:
-            valid_ids = set(raw_data['caract']['Num_Acc'])
-            orphans_data = {}
-            for t_name in ['lieux', 'usagers', 'vehicules']:
-                if not raw_data[t_name].empty:
-                    orphans = len(set(raw_data[t_name]['Num_Acc']) - valid_ids)
-                    orphans_data[t_name] = orphans
+    st.markdown("---")
 
-            if orphans_data:
-                fig_orphan = px.bar(x=list(orphans_data.keys()), y=list(orphans_data.values()),
-                                    title="Nombre de lignes orphelines par table",
-                                    labels={"x": "Table", "y": "Lignes orphelines"})
-                fig_orphan.update_layout(showlegend=False)
-                st.plotly_chart(fig_orphan, use_container_width=True)
+    # 4. Intégrité
+    st.subheader("4. Intégrité Structurelle & Référentielle")
+    i1, i2 = st.columns(2)
 
-                if sum(orphans_data.values()) == 0:
-                    st.success("✅ **Parfait** : Aucune clé étrangère orpheline. Le référentiel est sain.")
-                else:
-                    st.warning("⚠️ Des enregistrements orphelins existent. Ils seront perdus lors d'une jointure interne (INNER JOIN).")
+    with i1:
+        st.markdown("**Anomalie de la table `lieux`**")
+        st.error(f"Structure de données défectueuse détectée : **{profiling['lieux_duplicates']['accidents_multiples']:,}** accidents possèdent plusieurs lignes de description (jusqu'à {profiling['lieux_duplicates']['max_lignes_pour_un_acc']} lignes pour un seul `Num_Acc`). **Action requise :** Déduplication stricte avant jointure pour éviter l'explosion combinatoire.")
+
+    with i2:
+        st.markdown("**Clés étrangères (Orphelins)**")
+        ref_df = pd.DataFrame.from_dict(profiling["orphans"], orient="index", columns=["Lignes sans correspondance parent"])
+        st.dataframe(ref_df, use_container_width=True)
+        if ref_df["Lignes sans correspondance parent"].sum() == 0:
+            st.success("✅ Intégrité relationnelle validée : toutes les clés enfants pointent vers un accident existant.")
 
 # ----------------------------------------------------------------------
-# ONGLET 4 : LOGIQUE MÉTIER
+# ONGLET 2 : DASHBOARD
 # ----------------------------------------------------------------------
-with tab4:
-    st.header("🧠 Logique Métier & Enrichissement")
+with tab_dash:
+    st.sidebar.header("Filtres Analytiques")
 
-    if not raw_data['usagers'].empty and 'an_nais' in raw_data['usagers'].columns:
-        st.subheader("🎂 Cohérence Démographique (Calcul de l'Âge)")
-        st.markdown("L'âge n'est pas fourni directement. Il doit être calculé (`2024 - an_nais`). Il est crucial de détecter les aberrations avant le Feature Engineering.")
+    grav_options = sorted(fact_acc["Sévérité"].dropna().unique())
+    gravite_filter = st.sidebar.multiselect("Sévérité de l'accident", options=grav_options, default=grav_options)
 
-        age_stats = analyze_age_logic(raw_data['usagers'])
-        if age_stats:
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Âges Valides", f"{age_stats['valides']:,}")
-            c2.metric("Âges Négatifs", f"{age_stats['negatifs']:,}", delta="Erreur" if age_stats['negatifs']>0 else None, delta_color="inverse")
-            c3.metric("Centenaires (>105)", f"{age_stats['centenaires']:,}", delta="Outlier" if age_stats['centenaires']>0 else None, delta_color="inverse")
-            c4.metric("Années manquantes", f"{age_stats['manquants']:,}")
+    time_options = ["Matin", "Après-midi", "Soirée", "Nuit"]
+    moment_filter = st.sidebar.multiselect("Moment de la journée", options=time_options, default=time_options)
 
-            if age_stats['negatifs'] > 0 or age_stats['centenaires'] > 0:
-                st.warning("⚠️ **Anomalies détectées** : Des années de naissance sont incohérentes (ex: `an_nais` = 2025 ou `an_nais` = -1). <br>👉 *Action Gold : Imputation par la médiane ou création d'une catégorie 'Âge inconnu'.*", unsafe_allow_html=True)
+    filtered_fact = fact_acc[
+        (fact_acc["Sévérité"].isin(gravite_filter)) &
+        (fact_acc["time_of_day"].isin(moment_filter))
+    ]
+
+    st.header("Dashboard Analytique des Accidents")
+
+    # KPIs
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Accidents filtrés", f"{len(filtered_fact):,}")
+    k2.metric("Personnes Impliquées", f"{filtered_fact['nb_personnes'].sum():,.0f}")
+    k3.metric("Véhicules Impliqués", f"{filtered_fact['nb_vehicules'].sum():,.0f}")
+    pct_mortal = (filtered_fact["severity_index"] == 2).mean() * 100 if len(filtered_fact) > 0 else 0
+    k4.metric("Taux de Mortalité", f"{pct_mortal:.1f}%")
+
+    st.markdown("---")
+
+    col_chart1, col_chart2 = st.columns(2)
+
+    with col_chart1:
+        st.subheader("Typologie du Réseau Routier")
+        fig_route = px.bar(
+            filtered_fact["Type_Route"].value_counts().reset_index(),
+            x="Type_Route", y="count", color="Type_Route",
+            labels={"count": "Volume", "Type_Route": "Réseau"}
+        )
+        fig_route.update_layout(showlegend=False)
+        st.plotly_chart(fig_route, use_container_width=True)
+
+    with col_chart2:
+        st.subheader("Impact des Conditions Météorologiques")
+        sev_meteo = filtered_fact.groupby("Météo")["severity_index"].mean().reset_index().sort_values("severity_index", ascending=False)
+        fig_meteo = px.bar(
+            sev_meteo, x="Météo", y="severity_index", color="severity_index",
+            color_continuous_scale="Reds", labels={"severity_index": "Indice de Gravité Moyen"}
+        )
+        st.plotly_chart(fig_meteo, use_container_width=True)
+
+    # Carte Mapbox (Filtrée sur la métropole pour lisibilité)
+    st.subheader("Cartographie des Sinistres")
+    map_df = filtered_fact.dropna(subset=["latitude", "longitude"])
+    map_df = map_df[(map_df["latitude"].between(41, 51.5)) & (map_df["longitude"].between(-5.5, 10))]
+
+    if not map_df.empty:
+        fig_map = px.scatter_map(
+            map_df.sample(min(4000, len(map_df)), random_state=42),
+            lat="latitude", lon="longitude", color="Sévérité",
+            zoom=4.5, height=500, hover_data=["Type_Route", "time_of_day"]
+        )
+        fig_map.update_layout(margin={"r":0,"t":0,"l":0,"b":0})
+        st.plotly_chart(fig_map, use_container_width=True)
     else:
-        st.info("💡 Le fichier `usagers-2024.csv` est vide ou ne contient pas la colonne `an_nais`. L'audit démographique est ignoré.")
-
-    st.markdown("---")
-    st.subheader("📊 Distribution des Catégories (Vérification des Dictionnaires)")
-    st.markdown("Les dictionnaires de mappage (Luminosité, Météo, Type de route) couvrent-ils toutes les valeurs présentes dans la Bronze ?")
-
-    if not raw_data['caract'].empty:
-        cols_cat = st.columns(3)
-        mapping = {
-            "lum": {1: "Plein jour", 2: "Crépuscule", 3: "Nuit", 4: "Nuit (éclairage éteint)", 5: "Nuit (éclairage allumé)"},
-            "atm": {1: "Normale", 2: "Pluie", 3: "Pluie forte", 4: "Neige", 5: "Brouillard", 6: "Vent", 7: "Temps éblouissant", 8: "Couvert", 9: "Autre"},
-            "catr": {1: "Autoroute", 2: "Route Nationale", 3: "Route Départementale", 4: "Voie Communale", 5: "Hors réseau", 6: "Parking", 9: "Autre"}
-        }
-
-        for idx, (col, dico) in enumerate(mapping.items()):
-            with cols_cat[idx]:
-                if col in raw_data['caract'].columns:
-                    vals = raw_data['caract'][col].unique()
-                    unknown = [v for v in vals if v not in dico and not pd.isna(v) and v != -1]
-                    if unknown:
-                        st.error(f"`{col}` : Codes inconnus détectés ! {unknown}")
-                    else:
-                        st.success(f"`{col}` : Tous les codes sont mappés.")
-
-# ----------------------------------------------------------------------
-# ONGLET 5 : PIPELINE SILVER / GOLD
-# ----------------------------------------------------------------------
-with tab5:
-    st.header("🚀 Plan de Transformation (Silver & Gold)")
-    st.markdown("""
-    <div class="alert-box alert-info">
-    Basé sur l'audit ci-dessus, voici le pipeline de nettoyage et d'enrichissement qui sera appliqué pour passer de la couche <b>Bronze</b> à la couche <b>Gold</b> (prête pour le Machine Learning).
-    </div>
-    """, unsafe_allow_html=True)
-
-    pipeline_data = {
-        "Étape": [
-            "1. Standardization", "2. Standardization", "3. Standardization",
-            "4. Cleaning", "5. Cleaning", "6. Enrichment", "7. Enrichment"
-        ],
-        "Table Cible": [
-            "caract", "caract", "lieux, usagers, vehicules",
-            "lieux", "vehicules", "caract", "usagers"
-        ],
-        "Action Requise (Basée sur l'audit)": [
-            "Créer une colonne `datetime` unifiée à partir de (jour, mois, an, hrmn).",
-            "Fixer les coordonnées GPS : remplacer les virgules par des points et forcer le type numérique.",
-            "Remplacer toutes les valeurs sentinelles `-1` par de vrais `NaN` (nulls).",
-            "Déduplication stricte : garder une seule ligne par `Num_Acc` pour éviter l'explosion combinatoire.",
-            "Nettoyage des types de véhicules et suppression des doublons.",
-            "Création de features temporelles (time_of_day, weekend, etc.).",
-            "Calcul de l'âge (2024 - an_nais) et gestion des outliers (âges négatifs/centenaires)."
-        ],
-        "Statut Audit": [
-            "✅ Nécessaire" if not raw_data['caract'].empty else "⏳ En attente",
-            "✅ Nécessaire" if not raw_data['caract'].empty else "⏳ En attente",
-            "✅ Nécessaire" if any(not df.empty for df in raw_data.values()) else "⏳ En attente",
-            "🚨 Critique" if not raw_data['lieux'].empty and analyze_lieux_structure(raw_data['lieux'])['multi_rows'] > 0 else "✅ OK",
-            "✅ Nécessaire" if not raw_data['vehicules'].empty else "⏳ En attente",
-            "✅ Prêt", "✅ Prêt" if not raw_data['usagers'].empty else "⏳ En attente"
-        ]
-    }
-
-    df_pipeline = pd.DataFrame(pipeline_data)
-
-    # Affichage stylisé
-    st.dataframe(
-        df_pipeline,
-        column_config={
-            "Étape": st.column_config.TextColumn("Étape", width="small"),
-            "Table Cible": st.column_config.TextColumn("Table Cible", width="medium"),
-            "Action Requise (Basée sur l'audit)": st.column_config.TextColumn("Action Requise (Basée sur l'audit)", width="large"),
-            "Statut Audit": st.column_config.TextColumn("Statut", width="small")
-        },
-        hide_index=True,
-        use_container_width=True
-    )
-
-    st.markdown("---")
-    st.markdown("### 🏆 Résultat attendu en couche Gold")
-    st.markdown("""
-    - **Table de Faits (`fact_accidents`)** : Une ligne unique par accident, avec des features propres (datetime, météo, géolocalisation valide, sévérité max).
-    - **Tables de Dimensions** : Séparation claire des usagers et véhicules pour des analyses granulaires.
-    - **Zéro Sentinelle** : Plus de `-1`, les modèles de Machine Learning (XGBoost, Random Forest) pourront gérer les `NaN` natifs ou les imputer correctement.
-    """)
+        st.warning("Aucune donnée géographique exploitable pour cette sélection.")
