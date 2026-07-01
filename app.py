@@ -28,6 +28,7 @@ ATM_LABELS = {1: "Normale", 2: "Pluie légère", 3: "Pluie forte", 4: "Neige/Gr�
 CATR_LABELS = {1: "Autoroute", 2: "Route Nationale", 3: "Route Départementale", 4: "Voie Communale", 5: "Hors réseau public", 6: "Parc de stationnement", 9: "Autre"}
 CATU_LABELS = {1: "Conducteur", 2: "Passager", 3: "Piéton"}
 GRAV_LABELS = {1: "Indemne", 2: "Tué", 3: "Blessé hospitalisé", 4: "Blessé léger"}
+CATV_LABELS = {1: "Vélo", 2: "Cyclomoteur", 7: "Voiture", 10: "Véhicule utilitaire", 13: "Poids lourd (<7.5t)", 14: "Poids lourd (>=7.5t)", 30: "Scooter", 33: "Moto", 37: "Bus", 38: "Autocar"}
 
 # ======================================================================
 # COUCHE BRONZE : Chargement des données brutes
